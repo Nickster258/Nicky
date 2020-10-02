@@ -12,17 +12,20 @@ import net.milkbowl.vault.permission.Permission;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.*;
 import java.util.*;
 
 public class Nicky extends JavaPlugin
 {
-    private static String PREFIX;
-    private static JavaPlugin plugin;
+    private static NickyMessages MESSAGES;
+    
+    static JavaPlugin plugin;
 
     private final Set<SQL> databases;
     private static SQL DATABASE;
@@ -36,15 +39,15 @@ public class Nicky extends JavaPlugin
     private static List<String> BLACKLIST;
 
     private static boolean USE_JOIN_LEAVE;
-    private static String JOIN_MESSAGE;
-    private static String LEAVE_MESSAGE;
+    private static boolean USE_COLOR_LIMIT;
+    private static boolean USE_DISPLAY_NAME;
 
     private static Permission VAULT_PERMS = null;
-    private static HashMap<UUID, String> nicknames = new HashMap();
+    private static final HashMap<UUID, String> nicknames = new HashMap<>();
 
     public Nicky()
     {
-        databases = new HashSet();
+        databases = new HashSet<>();
     }
 
     @Override
@@ -60,12 +63,12 @@ public class Nicky extends JavaPlugin
         PluginManager pm = getServer().getPluginManager();
         pm.registerEvents( new PlayerListener(), this );
 
-        BLACKLIST = new ArrayList();
+        BLACKLIST = new ArrayList<>();
         reloadNickyConfig();
 
         getCommand( "nick" ).setExecutor( new NickCommand( this ) );
         getCommand( "delnick" ).setExecutor( new DelNickCommand( this ) );
-        getCommand( "realname" ).setExecutor( new RealNameCommand() );
+        getCommand( "realname" ).setExecutor( new RealNameCommand( this ) );
         getCommand( "nicky" ).setExecutor( new NickyCommand( this ) );
 
         if( !setupPermissions() )
@@ -83,6 +86,8 @@ public class Nicky extends JavaPlugin
         if( Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new NickyExpansion(this).register();
         }
+        
+        reloadNicknames();
     }
 
     @Override
@@ -91,16 +96,42 @@ public class Nicky extends JavaPlugin
         DATABASE.disconnect();
     }
 
+    private void copyFile(File destination, String source) throws IOException
+    {
+        if ( !destination.exists() )
+        {
+            BufferedInputStream reader = new BufferedInputStream( Objects.requireNonNull( this.getResource( source ) ) );
+            BufferedOutputStream writer = new BufferedOutputStream( new FileOutputStream( destination ) );
+            
+            byte[] buffer = new byte[4096];
+            int read;
+            while ( ( read = reader.read( buffer, 0, buffer.length ) ) != -1 ) {
+                writer.write( buffer, 0, read );
+            }
+            
+            reader.close();
+            writer.close();
+        }
+    }
+    
+    private void copyFiles() throws IOException
+    {
+        copyFile(  new File( this.getDataFolder(), "messages.yml" ), "messages.yml" );
+    }
+    
     public void reloadNickyConfig()
     {
         super.reloadConfig();
-
+        try {
+            copyFiles();
+        } catch (IOException ex) {
+            throw new RuntimeException( "Failed to copy config files", ex );
+        }
+        
         FileConfiguration config = getConfig();
 
         try
         {
-            PREFIX = ChatColor.YELLOW + ChatColor.translateAlternateColorCodes( '&', config.get( "nicky_prefix" ).toString() ) + ChatColor.GREEN + " ";
-
             // Database info not set in this class.
 
             TABS = config.getBoolean( "tab" );
@@ -113,19 +144,35 @@ public class Nicky extends JavaPlugin
             BLACKLIST.clear();
             BLACKLIST = config.getStringList( "blacklist" );
 
+            USE_COLOR_LIMIT = config.getBoolean( "enable_color_limit" );
             USE_JOIN_LEAVE = config.getBoolean( "enable_join_leave" );
-            JOIN_MESSAGE = ChatColor.translateAlternateColorCodes( '&', config.getString( "join_message" ));
-            LEAVE_MESSAGE = ChatColor.translateAlternateColorCodes( '&',config.getString( "leave_message" ));
+            USE_DISPLAY_NAME = config.getBoolean( "set_display_name" );
+
+            // Load messages.
+            FileConfiguration messagesDefault = new YamlConfiguration();
+            FileConfiguration messagesFile = new YamlConfiguration();
+            messagesDefault.load( Objects.requireNonNull( this.getTextResource( "messages.yml" ) ) );
+            messagesFile.load( new File( this.getDataFolder(), "messages.yml" ) );
+            messagesFile.setDefaults( messagesDefault );
+            MESSAGES = new NickyMessages( messagesFile, config );
         }
         catch( Exception e )
         {
             log( "Warning - You have an error in your config." );
+            e.printStackTrace();
         }
 
+        if (DATABASE != null)
+        {
+            reloadNicknames();
+        }
+    }
+    
+    private void reloadNicknames()
+    {
         for( Player player : Bukkit.getServer().getOnlinePlayers() )
         {
             Nick nick = new Nick( player );
-
             nick.load();
         }
     }
@@ -138,11 +185,6 @@ public class Nicky extends JavaPlugin
 
         // Update header.
         config.options().copyHeader();
-
-        if( ! config.isSet( "nicky_prefix" ) )
-        {
-            config.set( "nicky_prefix", "[Nicky]" );
-        }
 
         // Database config
         if( ! config.isSet( "type" ) )
@@ -168,6 +210,10 @@ public class Nicky extends JavaPlugin
         if( ! config.isSet( "database" ) )
         {
             config.set( "database", "nicky" );
+        }
+        if( ! config.isSet( "table_name" ) )
+        {
+            config.set( "table_name", "nicky" );
         }
 
         // Settings
@@ -200,21 +246,23 @@ public class Nicky extends JavaPlugin
             List<String> listOfStrings = Arrays.asList( "Melonking", "Admin" );
             config.set( "blacklist", listOfStrings );
         }
-
+        if( ! config.isSet( "enable_color_limit" ) )
+        {
+            config.set( "enable_color_limit", false );
+        }
+        
         // Join Leave
         if( ! config.isSet( "enable_join_leave" ) )
         {
             config.set( "enable_join_leave", true );
         }
-        if( ! config.isSet( "join_message" ) )
-        {
-            config.set( "join_message", "&e{nickname} &ahas connected!" );
-        }
-        if( ! config.isSet( "leave_message" ) )
-        {
-            config.set( "leave_message", "&e{nickname} &chas disconnected!" );
-        }
 
+        // Display name.
+        if( ! config.isSet( "set_display_name" ) )
+        {
+            config.set( "set_display_name", true );
+        }
+        
         saveConfig();
     }
 
@@ -254,6 +302,15 @@ public class Nicky extends JavaPlugin
 
     public static void setNickname(UUID uuid, String nickname) {
         nicknames.put(uuid, nickname);
+        
+        if ( useDisplayName() )
+        {
+            Player player = plugin.getServer().getPlayer(uuid);
+            if ( player != null )
+            {
+                player.setDisplayName(nickname);
+            }
+        }
     }
 
     public static String getNickname(UUID uuid) {
@@ -278,8 +335,6 @@ public class Nicky extends JavaPlugin
 
     public static SQL getNickDatabase() { return DATABASE; }
 
-    public static String getPrefix() { return PREFIX; }
-
     public static boolean isTabsUsed() { return TABS; }
 
     public static boolean isUnique() { return UNIQUE; }
@@ -288,7 +343,7 @@ public class Nicky extends JavaPlugin
 
     public static List<String> getBlacklist() { return BLACKLIST; }
 
-    public static int getLength() { return LENGTH; }
+    public static int getMaxLength() { return LENGTH; }
 
     public static int getMinLength() { return MIN_LENGTH; }
 
@@ -296,10 +351,12 @@ public class Nicky extends JavaPlugin
 
     public static boolean useJoinLeave() { return USE_JOIN_LEAVE; }
 
-    public static String getJoinMessage() { return JOIN_MESSAGE; }
+    public static boolean useColorLimit() { return USE_COLOR_LIMIT; }
+    
+    public static boolean useDisplayName() { return USE_DISPLAY_NAME; }
 
-    public static String getLeaveMessage() { return LEAVE_MESSAGE; }
-
+    public static NickyMessages getMessages() { return MESSAGES; }
+    
     public void log( String message )
     {
         getLogger().info( message );
